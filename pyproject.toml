@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "proxyscrape-client"
+version = "0.1.0"
+description = "A Requests client with a rotating ProxyScrape proxy pool"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["requests[socks]>=2.32,<3", "urllib3>=2,<3"]
+
+[tool.setuptools.package-data]
+proxyscrape_client = ["py.typed"]
