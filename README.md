@@ -65,7 +65,7 @@ Some HTTPS requests must not be sent twice, such as a payment or any non-idempot
 ### How it works
 
 1. **Rank.** Candidates are ordered by source-reported HTTPS support, uptime, and latency. The target's cooldown is respected.
-2. **Probe.** Anonymous `HEAD` probes are sent in batches. The client moves on to the next batch only if every candidate in the current batch fails.
+2. **Probe.** Anonymous probes are sent in batches. The client moves on to the next batch only if every candidate in the current batch fails.
 3. **Send.** The first candidate to pass receives the original request, once.
 
 ### Configuration
@@ -74,6 +74,7 @@ Some HTTPS requests must not be sent twice, such as a payment or any non-idempot
 |---|---|---|---|
 | `preflight_concurrency` | `Client` | `3` | Number of candidates probed per batch |
 | `preflight_max_attempts` | `Client` | `9` | Total number of candidates to try |
+| `preflight_method` | `Client` | `HEAD` | Use `HEAD` or `OPTIONS` for each probe |
 | `max_attempts` | per request | `preflight_max_attempts` | Overrides the candidate limit for a single request |
 | `timeout` | per request | n/a | Bounds both the probing phase and the original request |
 

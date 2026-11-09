@@ -40,16 +40,20 @@ class Client:
         attempt_timeout: float = 4,
         preflight_concurrency: int = 3,
         preflight_max_attempts: int = 9,
+        preflight_method: str = "HEAD",
     ) -> None:
         if type(preflight_concurrency) is not int or preflight_concurrency < 1:
             raise ValueError("preflight_concurrency must be a positive integer")
         if type(preflight_max_attempts) is not int or preflight_max_attempts < 1:
             raise ValueError("preflight_max_attempts must be a positive integer")
+        if preflight_method not in ("HEAD", "OPTIONS"):
+            raise ValueError("preflight_method must be HEAD or OPTIONS")
         self._defaults = Filters(country, protocol)
         self._source_timeout = positive_seconds(source_timeout, "source_timeout")
         self._attempt_timeout = positive_seconds(attempt_timeout, "attempt_timeout")
         self._preflight_concurrency = preflight_concurrency
         self._preflight_max_attempts = preflight_max_attempts
+        self._preflight_method = preflight_method
         refresh_interval = positive_seconds(refresh_interval, "refresh_interval")
         max_stale = positive_seconds(max_stale, "max_stale")
         if max_stale < refresh_interval:
@@ -79,7 +83,9 @@ class Client:
         remaining = deadline.remaining()
         if not remaining:
             raise _transport.ProxyTransportError("Proxy preflight exceeded its time budget")
-        with _transport.send("HEAD", url, proxy, min(remaining, self._attempt_timeout), options) as response:
+        with _transport.send(
+            self._preflight_method, url, proxy, min(remaining, self._attempt_timeout), options
+        ) as response:
             status = response.status_code
         if not (200 <= status < 400 or status in (401, 404, 405)):
             raise _transport.ProxyTransportError(f"Proxy preflight returned HTTP {status}")
@@ -148,7 +154,7 @@ class Client:
     ) -> requests.Response:
         """Send a buffered request through one or more eligible proxies.
 
-        With preflight enabled, probe candidates with anonymous HEAD requests in
+        With preflight enabled, probe candidates with anonymous requests in
         groups limited by preflight_concurrency. Send the original request once
         through the first passing proxy.
         Accept 2xx, 3xx, 401, 404 and 405 from the probe. Both operations share

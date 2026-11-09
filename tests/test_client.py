@@ -93,17 +93,17 @@ class ClientTests(unittest.TestCase):
 
         send.side_effect = respond
         url = "https://example.test/refresh?secret=hidden"
-        with Client() as client:
+        with Client(preflight_method="OPTIONS") as client:
             client._pool.record(("https", "example.test", 443), working, 0.1)
             with self.assertRaisesRegex(ProxyRequestError, "failed after preflight"):
                 client.post(url, preflight=True, headers={"Authorization": "Bearer example"}, json={"token": "example"})
         self.assertCountEqual([call.args[2] for call in send.call_args_list[:3]], first_batch)
         self.assertEqual(
             [(call.args[0], call.args[2]) for call in send.call_args_list[3:]],
-            [("HEAD", working), ("POST", working)],
+            [("OPTIONS", working), ("POST", working)],
         )
         for call in send.call_args_list[:4]:
-            self.assertEqual(call.args[0], "HEAD")
+            self.assertEqual(call.args[0], "OPTIONS")
             self.assertEqual(call.args[1], "https://example.test/refresh")
             self.assertEqual(call.args[4], {"allow_redirects": False, "verify": True, "headers": {}})
         self.assertEqual(send.call_args.args[1], url)
