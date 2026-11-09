@@ -5,6 +5,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Event, Thread
 from unittest.mock import patch
 
+from requests import Response
+
 from proxyscrape_client import Client, NoProxyAvailable, Proxy, ProxyRequestError, ProxySourceError
 from proxyscrape_client._transport import ProxyTransportError
 
@@ -68,6 +70,40 @@ class ClientTests(unittest.TestCase):
                 client.get("https://third.test/", max_attempts=1)
             self.assertEqual(limited.exception.attempts, 1)
             self.assertEqual(send.call_count, 4)
+
+    @patch("proxyscrape_client.client._transport.send")
+    @patch("proxyscrape_client.client.ProxyScrapeSource")
+    def test_preflight_skips_failed_candidates_and_uses_the_passing_proxy_once(self, source, send):
+        offline, blocked, working = (candidate(8001, 99), candidate(8002, 95), candidate(8003, 90))
+        source.return_value.fetch.return_value = (offline, blocked, working)
+        forbidden, allowed = Response(), Response()
+        forbidden.status_code, allowed.status_code = 403, 405
+        forbidden._content_consumed = allowed._content_consumed = True
+        send.side_effect = [ProxyTransportError("offline"), forbidden, allowed, ProxyTransportError("lost reply")]
+        url = "https://example.test/refresh?secret=hidden"
+        with Client() as client:
+            with self.assertRaisesRegex(ProxyRequestError, "failed after preflight"):
+                client.post(url, preflight=True, headers={"Authorization": "Bearer example"}, json={"token": "example"})
+        self.assertEqual(
+            [(call.args[0], call.args[2]) for call in send.call_args_list],
+            [("HEAD", offline), ("HEAD", blocked), ("HEAD", working), ("POST", working)],
+        )
+        for call in send.call_args_list[:3]:
+            self.assertEqual(call.args[1], "https://example.test/refresh")
+            self.assertEqual(call.args[4], {"allow_redirects": False, "verify": True, "headers": {}})
+        self.assertEqual(send.call_args.args[1], url)
+        self.assertEqual(send.call_args.args[4]["json"], {"token": "example"})
+
+    @patch("proxyscrape_client.client._transport.send")
+    @patch("proxyscrape_client.client.ProxyScrapeSource")
+    def test_preflight_exhaustion_sends_no_post(self, source, send):
+        source.return_value.fetch.return_value = (candidate(8001, 99), candidate(8002, 95), candidate(8003, 90))
+        send.side_effect = ProxyTransportError("offline")
+        with Client() as client:
+            with self.assertRaisesRegex(ProxyRequestError, "No proxy passed preflight") as failure:
+                client.post("https://example.test/refresh", preflight=True, max_attempts=2, data=b"private")
+        self.assertEqual(failure.exception.attempts, 2)
+        self.assertEqual([call.args[0] for call in send.call_args_list], ["HEAD", "HEAD"])
 
     @patch("proxyscrape_client.client.ProxyScrapeSource")
     def test_empty_country_does_not_use_other_cached_country(self, source):

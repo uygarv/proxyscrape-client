@@ -75,9 +75,16 @@ class Client:
         timeout: float = 15,
         max_attempts: int = 3,
         retry_unsafe: bool = False,
+        preflight: bool = False,
         **options: Any,
     ) -> requests.Response:
-        """Send a buffered request through one or more eligible proxies."""
+        """Send a buffered request through one or more eligible proxies.
+
+        With preflight enabled, probe each candidate with an anonymous HEAD
+        and send the original request once through the first passing proxy.
+        Accept 2xx, 3xx, 401, 404 and 405 from the probe. Both operations share
+        the timeout, and max_attempts limits the number of candidates probed.
+        """
         if type(max_attempts) is not int or max_attempts < 1:
             raise ValueError("max_attempts must be a positive integer")
         if "proxies" in options:
@@ -90,6 +97,17 @@ class Client:
 
         method = method.upper()
         origin = _origin(url)
+        if preflight:
+            parsed = urlsplit(url)
+            if parsed.scheme != "https" or parsed.username is not None or parsed.password is not None:
+                raise ValueError("preflight requires an HTTPS URL without user information")
+            probe_url = parsed._replace(query="", fragment="").geturl()
+            request_headers = requests.structures.CaseInsensitiveDict(options.get("headers") or {})
+            probe_options = {
+                "allow_redirects": False,
+                "verify": verify if verify is not None else True,
+                "headers": {name: request_headers[name] for name in ("Accept", "User-Agent") if name in request_headers},
+            }
         filters = self._filters(country, protocol)
         deadline = Deadline.after(positive_seconds(timeout, "timeout"))
         # Retry buffered bodies only. File handles and iterators may have been
@@ -98,7 +116,7 @@ class Client:
         replayable = not options.get("files") and (
             body is None or isinstance(body, (bytes, str))
         )
-        if not replayable or (method not in _SAFE_METHODS and not retry_unsafe):
+        if not preflight and (not replayable or (method not in _SAFE_METHODS and not retry_unsafe)):
             max_attempts = 1
 
         proxies = self._pool.ranked(self._pool.snapshot(filters, deadline), origin)
@@ -108,12 +126,29 @@ class Client:
             )
         attempts = 0
         last_error: Exception | None = None
+        sent = False
         for proxy in proxies[:max_attempts]:
             remaining = deadline.remaining()
             if not remaining:
                 break
             attempts += 1
+            if preflight:
+                try:
+                    with _transport.send(
+                        "HEAD", probe_url, proxy, min(remaining, self._attempt_timeout), probe_options
+                    ) as probe:
+                        status = probe.status_code
+                    if not (200 <= status < 400 or status in (401, 404, 405)):
+                        raise _transport.ProxyTransportError(f"Proxy preflight returned HTTP {status}")
+                except (_transport.ProxyTransportError, requests.exceptions.SSLError) as exc:
+                    self._pool.record(origin, proxy, None)
+                    last_error = exc
+                    continue
+                remaining = deadline.remaining()
+                if not remaining:
+                    break
             started = monotonic()
+            sent = True
             try:
                 response = _transport.send(
                     method, url, proxy, min(remaining, self._attempt_timeout), options
@@ -121,17 +156,22 @@ class Client:
             except _transport.ProxyTransportError as exc:
                 self._pool.record(origin, proxy, None)
                 last_error = exc
+                if preflight:
+                    break
                 continue
             self._pool.record(origin, proxy, monotonic() - started)
             if deadline.remaining():
                 return response
             response.close()
             break
-        message = (
-            "Proxy request exceeded its time budget"
-            if not deadline.remaining()
-            else "Proxy request failed on all attempted proxies"
-        )
+        if not deadline.remaining():
+            message = "Proxy request exceeded its time budget"
+        elif preflight and not sent:
+            message = f"No proxy passed preflight ({attempts} candidates)"
+        elif preflight:
+            message = "Proxy request failed after preflight and was not retried"
+        else:
+            message = "Proxy request failed on all attempted proxies"
         raise ProxyRequestError(message, attempts=attempts) from last_error
 
     def get(self, url: str, **options: Any) -> requests.Response:
