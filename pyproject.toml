@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "proxyscrape-client"
-version = "0.1.1"
+version = "0.1.2"
 description = "A Requests client with a rotating ProxyScrape proxy pool"
 readme = "README.md"
 license = "MIT"

@@ -2,7 +2,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Event, Thread
+from threading import Barrier, Event, Thread
 from unittest.mock import patch
 
 from requests import Response
@@ -74,21 +74,36 @@ class ClientTests(unittest.TestCase):
     @patch("proxyscrape_client.client._transport.send")
     @patch("proxyscrape_client.client.ProxyScrapeSource")
     def test_preflight_skips_failed_candidates_and_uses_the_passing_proxy_once(self, source, send):
-        offline, blocked, working = (candidate(8001, 99), candidate(8002, 95), candidate(8003, 90))
-        source.return_value.fetch.return_value = (offline, blocked, working)
-        forbidden, allowed = Response(), Response()
-        forbidden.status_code, allowed.status_code = 403, 405
-        forbidden._content_consumed = allowed._content_consumed = True
-        send.side_effect = [ProxyTransportError("offline"), forbidden, allowed, ProxyTransportError("lost reply")]
+        first_batch = tuple(candidate(8000 + index, 100 - index) for index in range(3))
+        working = candidate(8003, 90)
+        source.return_value.fetch.return_value = (working, *first_batch)
+        started = Barrier(3)
+
+        def respond(method, url, proxy, timeout, options):
+            if method == "POST":
+                raise ProxyTransportError("lost reply")
+            if proxy in first_batch:
+                started.wait(2)
+                if proxy != first_batch[1]:
+                    raise ProxyTransportError("offline")
+            reply = Response()
+            reply.status_code = 405 if proxy == working else 403
+            reply._content_consumed = True
+            return reply
+
+        send.side_effect = respond
         url = "https://example.test/refresh?secret=hidden"
         with Client() as client:
+            client._pool.record(("https", "example.test", 443), working, 0.1)
             with self.assertRaisesRegex(ProxyRequestError, "failed after preflight"):
                 client.post(url, preflight=True, headers={"Authorization": "Bearer example"}, json={"token": "example"})
+        self.assertCountEqual([call.args[2] for call in send.call_args_list[:3]], first_batch)
         self.assertEqual(
-            [(call.args[0], call.args[2]) for call in send.call_args_list],
-            [("HEAD", offline), ("HEAD", blocked), ("HEAD", working), ("POST", working)],
+            [(call.args[0], call.args[2]) for call in send.call_args_list[3:]],
+            [("HEAD", working), ("POST", working)],
         )
-        for call in send.call_args_list[:3]:
+        for call in send.call_args_list[:4]:
+            self.assertEqual(call.args[0], "HEAD")
             self.assertEqual(call.args[1], "https://example.test/refresh")
             self.assertEqual(call.args[4], {"allow_redirects": False, "verify": True, "headers": {}})
         self.assertEqual(send.call_args.args[1], url)
@@ -104,6 +119,66 @@ class ClientTests(unittest.TestCase):
                 client.post("https://example.test/refresh", preflight=True, max_attempts=2, data=b"private")
         self.assertEqual(failure.exception.attempts, 2)
         self.assertEqual([call.args[0] for call in send.call_args_list], ["HEAD", "HEAD"])
+
+    @patch("proxyscrape_client.client._transport.send")
+    @patch("proxyscrape_client.client.ProxyScrapeSource")
+    def test_preflight_sends_post_without_waiting_for_slower_probes(self, source, send):
+        first, winner, third, unused = tuple(candidate(8000 + index, 100 - index) for index in range(4))
+        source.return_value.fetch.return_value = (first, winner, third, unused)
+        started = Barrier(3)
+        post_started = Event()
+
+        def respond(method, url, proxy, timeout, options):
+            if method == "HEAD":
+                started.wait(2)
+                if proxy != winner:
+                    if not post_started.wait(2):
+                        raise AssertionError("POST waited for the slower probes")
+                    raise ProxyTransportError("offline")
+            else:
+                post_started.set()
+            reply = Response()
+            reply.status_code = 200
+            reply._content_consumed = True
+            return reply
+
+        send.side_effect = respond
+        with Client() as client:
+            with client.post("https://example.test/refresh", preflight=True) as response:
+                self.assertEqual(response.status_code, 200)
+        self.assertCountEqual([call.args[2] for call in send.call_args_list[:3]], (first, winner, third))
+        self.assertEqual([(call.args[0], call.args[2]) for call in send.call_args_list[3:]], [("POST", winner)])
+
+    @patch("proxyscrape_client.client._transport.send", side_effect=ProxyTransportError("offline"))
+    @patch("proxyscrape_client.client.ProxyScrapeSource")
+    def test_preflight_tries_at_most_nine_candidates_by_default(self, source, send):
+        source.return_value.fetch.return_value = tuple(candidate(8000 + index, 100 - index) for index in range(12))
+        with Client() as client:
+            with self.assertRaisesRegex(ProxyRequestError, "9 candidates"):
+                client.post("https://example.test/refresh", preflight=True)
+        self.assertEqual(send.call_count, 9)
+
+    @patch("proxyscrape_client.client._transport.send")
+    @patch("proxyscrape_client.client.ProxyScrapeSource")
+    def test_preflight_uses_custom_batch_size_and_candidate_limit(self, source, send):
+        proxies = tuple(candidate(8000 + index, 100 - index) for index in range(6))
+        source.return_value.fetch.return_value = proxies
+        started = Barrier(2)
+
+        def fail(method, url, proxy, timeout, options):
+            if proxy in proxies[:4]:
+                started.wait(2)
+            raise ProxyTransportError("offline")
+
+        send.side_effect = fail
+        with Client(preflight_concurrency=2, preflight_max_attempts=5) as client:
+            with self.assertRaisesRegex(ProxyRequestError, "5 candidates"):
+                client.post("https://example.test/refresh", preflight=True)
+        calls = [call.args[2] for call in send.call_args_list]
+        self.assertCountEqual(calls[:2], proxies[:2])
+        self.assertCountEqual(calls[2:4], proxies[2:4])
+        self.assertEqual(calls[4:], [proxies[4]])
+        self.assertTrue(all(call.args[0] == "HEAD" for call in send.call_args_list))
 
     @patch("proxyscrape_client.client.ProxyScrapeSource")
     def test_empty_country_does_not_use_other_cached_country(self, source):

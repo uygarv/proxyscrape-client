@@ -101,7 +101,9 @@ class ProxyPool:
                 except ProxySourceError:
                     continue
 
-    def ranked(self, proxies: tuple[Proxy, ...], origin: Origin | None = None) -> list[Proxy]:
+    def ranked(
+        self, proxies: tuple[Proxy, ...], origin: Origin | None = None, *, prefer_measured: bool = True
+    ) -> list[Proxy]:
         now = monotonic()
         with self._lock:
             ranked = []
@@ -109,7 +111,7 @@ class ProxyPool:
                 health = self._health.get((origin, proxy.url)) if origin is not None else None
                 if health is not None and health.blocked_until > now:
                     continue
-                measured = health.latency if health is not None else None
+                measured = health.latency if health is not None and prefer_measured else None
                 rank = (
                     measured is None,
                     measured if measured is not None else 0.0,

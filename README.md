@@ -58,6 +58,37 @@ Everything the library raises on purpose inherits from `ProxyScrapeError`, so yo
 - `NoProxyAvailable`: no eligible proxy was available.
 - `ProxyRequestError`: the request ran out of attempts or time. Its `attempts` attribute tells you how many proxies were tried.
 
+## Single-shot requests with preflight
+
+Some HTTPS requests must not be sent twice, such as a payment or any non-idempotent call. Pass `preflight=True` to make sure the request goes out exactly once, through a candidate that has already been checked.
+
+### How it works
+
+1. **Rank.** Candidates are ordered by source-reported HTTPS support, uptime, and latency. The target's cooldown is respected.
+2. **Probe.** Anonymous `HEAD` probes are sent in batches. The client moves on to the next batch only if every candidate in the current batch fails.
+3. **Send.** The first candidate to pass receives the original request, once.
+
+### Configuration
+
+| Option | Where | Default | Description |
+|---|---|---|---|
+| `preflight_concurrency` | `Client` | `3` | Number of candidates probed per batch |
+| `preflight_max_attempts` | `Client` | `9` | Total number of candidates to try |
+| `max_attempts` | per request | `preflight_max_attempts` | Overrides the candidate limit for a single request |
+| `timeout` | per request | n/a | Bounds both the probing phase and the original request |
+
+### Example
+
+```python
+client = Client(preflight_concurrency=5, preflight_max_attempts=12)
+
+# Uses the client-level limits
+client.post(url, data=payload, preflight=True)
+
+# Tighter limits for this request only
+client.post(url, data=payload, preflight=True, max_attempts=4, timeout=10)
+```
+
 ## Examples
 
 ### List SOCKS5 proxies in a country
